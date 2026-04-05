@@ -73,6 +73,87 @@ async function moveTab(tabId, index, retries = 2) {
   }
 }
 
+async function moveGroup(groupId, index, retries = 2) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await chrome.tabGroups.move(groupId, { index });
+      return;
+    } catch (error) {
+      const message = `${error?.message ?? ''}`;
+      if (attempt === retries || !message.includes('Tabs cannot be edited right now')) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+function getMovableHighlightedItems(tabs, highlightedTabs) {
+  const highlightedTabIds = new Set(highlightedTabs.map((tab) => tab.id));
+  const sortedHighlightedTabs = [...highlightedTabs].sort((a, b) => a.index - b.index);
+  const groupTabsById = new Map();
+  const processedGroupIds = new Set();
+  const items = [];
+
+  for (const tab of tabs) {
+    if (tab.groupId === TAB_GROUP_ID_NONE) continue;
+
+    const groupTabs = groupTabsById.get(tab.groupId) ?? [];
+    groupTabs.push(tab);
+    groupTabsById.set(tab.groupId, groupTabs);
+  }
+
+  for (const tab of sortedHighlightedTabs) {
+    if (tab.groupId === TAB_GROUP_ID_NONE) {
+      items.push({ type: 'tab', tabId: tab.id, startIndex: tab.index, endIndex: tab.index });
+      continue;
+    }
+
+    if (processedGroupIds.has(tab.groupId)) continue;
+
+    const groupTabs = groupTabsById.get(tab.groupId) ?? [tab];
+    const wholeGroupHighlighted = groupTabs.every((groupTab) => highlightedTabIds.has(groupTab.id));
+
+    if (!wholeGroupHighlighted) {
+      items.push({ type: 'tab', tabId: tab.id, startIndex: tab.index, endIndex: tab.index });
+      continue;
+    }
+
+    processedGroupIds.add(tab.groupId);
+    items.push({
+      type: 'group',
+      groupId: tab.groupId,
+      startIndex: groupTabs[0].index,
+      endIndex: groupTabs[groupTabs.length - 1].index
+    });
+  }
+
+  return { items, sortedHighlightedTabs };
+}
+
+function getPinnedBoundary(tabs) {
+  const firstUnpinnedIndex = tabs.findIndex((tab) => !tab.pinned);
+  return {
+    firstUnpinnedIndex: firstUnpinnedIndex === -1 ? tabs.length : firstUnpinnedIndex,
+    lastPinnedIndex: firstUnpinnedIndex === -1 ? tabs.length - 1 : firstUnpinnedIndex - 1
+  };
+}
+
+function getCollapseFocusTargetTabId(tabs, blockedGroupIds, activeTab) {
+  if (!activeTab || activeTab.groupId === TAB_GROUP_ID_NONE || !blockedGroupIds.has(activeTab.groupId)) {
+    return activeTab?.id ?? null;
+  }
+
+  const activeGroupTabs = tabs.filter((tab) => tab.groupId === activeTab.groupId);
+  if (activeGroupTabs.length === 0) return activeTab.id;
+
+  const groupStartIndex = activeGroupTabs[0].index;
+  const groupEndIndex = activeGroupTabs[activeGroupTabs.length - 1].index;
+  const rightTab = tabs.find((tab) => tab.index > groupEndIndex && !blockedGroupIds.has(tab.groupId));
+  if (rightTab) return rightTab.id;
+
+  const leftTabs = tabs.filter((tab) => tab.index < groupStartIndex && !blockedGroupIds.has(tab.groupId));
+  return leftTabs[leftTabs.length - 1]?.id ?? activeTab.id;
+}
+
 async function activateRelativeTab(offset) {
   const context = await getTabContext();
   if (!context) return;
@@ -90,8 +171,11 @@ async function moveActiveTab(offset) {
   if (!context) return;
 
   const { activeTab, tabs } = context;
+  const { firstUnpinnedIndex, lastPinnedIndex } = getPinnedBoundary(tabs);
+  const minIndex = activeTab.pinned ? 0 : firstUnpinnedIndex;
+  const maxIndex = activeTab.pinned ? lastPinnedIndex : tabs.length - 1;
 
-  const targetIndex = Math.min(Math.max(activeTab.index + offset, 0), tabs.length - 1);
+  const targetIndex = Math.min(Math.max(activeTab.index + offset, minIndex), maxIndex);
   await moveTab(activeTab.id, targetIndex);
   await chrome.tabs.update(activeTab.id, { active: true });
 }
@@ -140,21 +224,33 @@ async function moveHighlightedTabs(offset) {
     return;
   }
 
+  const containsPinnedTabs = highlightedTabs.some((tab) => tab.pinned);
+  const containsUnpinnedTabs = highlightedTabs.some((tab) => !tab.pinned);
+  if (containsPinnedTabs && containsUnpinnedTabs) return;
+
   const activeHighlightedTab = highlightedTabs.find((tab) => tab.active) || highlightedTabs[0];
-  highlightedTabs.sort((a, b) => a.index - b.index);
+  const { items, sortedHighlightedTabs } = getMovableHighlightedItems(tabs, highlightedTabs);
+  const { firstUnpinnedIndex, lastPinnedIndex } = getPinnedBoundary(tabs);
+  const leftBoundary = containsPinnedTabs ? 0 : firstUnpinnedIndex;
+  const rightBoundary = containsPinnedTabs ? lastPinnedIndex : tabs.length - 1;
 
-  const firstIndex = highlightedTabs[0].index;
-  const lastIndex = highlightedTabs[highlightedTabs.length - 1].index;
+  const firstIndex = items[0].startIndex;
+  const lastIndex = items[items.length - 1].endIndex;
 
-  if (offset < 0 && firstIndex === 0) return;
-  if (offset > 0 && lastIndex === tabs.length - 1) return;
+  if (offset < 0 && firstIndex === leftBoundary) return;
+  if (offset > 0 && lastIndex === rightBoundary) return;
 
-  const orderedTabs = offset < 0 ? highlightedTabs : [...highlightedTabs].reverse();
-  for (const tab of orderedTabs) {
-    await moveTab(tab.id, tab.index + offset);
+  const orderedItems = offset < 0 ? items : [...items].reverse();
+  for (const item of orderedItems) {
+    if (item.type === 'group') {
+      await moveGroup(item.groupId, item.startIndex + offset);
+      continue;
+    }
+
+    await moveTab(item.tabId, item.startIndex + offset);
   }
 
-  const tabIds = highlightedTabs.map((tab) => tab.id);
+  const tabIds = sortedHighlightedTabs.map((tab) => tab.id);
   await restoreHighlightedTabs(windowId, tabIds, activeHighlightedTab.id);
 }
 
@@ -191,7 +287,7 @@ async function collapseSelectedGroups() {
   const context = await getTabContext();
   if (!context) return;
 
-  const { tabs } = context;
+  const { tabs, windowId } = context;
   const highlightedTabs = tabs.filter((tab) => tab.highlighted);
   if (highlightedTabs.length === 0) return;
 
@@ -202,12 +298,18 @@ async function collapseSelectedGroups() {
       .filter((groupId) => groupId !== TAB_GROUP_ID_NONE)
   )];
   if (groupIds.length === 0) return;
+  const tabGroups = await chrome.tabGroups.query({ windowId });
+  const blockedGroupIds = new Set([
+    ...groupIds,
+    ...tabGroups.filter((group) => group.collapsed).map((group) => group.id)
+  ]);
+  const focusTargetTabId = getCollapseFocusTargetTabId(tabs, blockedGroupIds, activeHighlightedTab);
 
   for (const groupId of groupIds) {
     await chrome.tabGroups.update(groupId, { collapsed: true });
   }
 
-  await chrome.tabs.update(activeHighlightedTab.id, { active: true });
+  await chrome.tabs.update(focusTargetTabId, { active: true });
 }
 
 chrome.commands.onCommand.addListener(async (command) => {
