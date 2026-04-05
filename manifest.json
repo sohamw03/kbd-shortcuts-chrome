@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Keyboard Tab Shortcuts",
+  "description": "Keybinds to jump between tabs, move them, pin/unpin, duplicate, multi-select, and group.",
+  "version": "0.3.0",
+  "action": {
+    "default_title": "Keyboard Tab Shortcuts"
+  },
+  "permissions": ["tabs", "tabGroups"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "select-tab-left": {
+      "description": "Activate the tab to the left"
+    },
+    "select-tab-right": {
+      "description": "Activate the tab to the right"
+    },
+    "move-tab-left": {
+      "description": "Move the current tab left"
+    },
+    "move-tab-right": {
+      "description": "Move the current tab right"
+    },
+    "toggle-pin-tab": {
+      "description": "Pin or unpin the current tab"
+    },
+    "duplicate-tab": {
+      "description": "Duplicate the current tab"
+    },
+    "add-selection-left": {
+      "description": "Add the tab to the left to selection"
+    },
+    "add-selection-right": {
+      "description": "Add the tab to the right to selection"
+    },
+    "group-selected-tabs": {
+      "description": "Group selected tabs"
+    },
+    "toggle-group-collapsed": {
+      "description": "Collapse the selected tab group or groups"
+    }
+  }
+}
